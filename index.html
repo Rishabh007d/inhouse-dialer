@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dialer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jssip/3.10.0/jssip.min.js"></script>
+<style>
+:root{--bg:#e8edef;--panel:#f7f9fa;--ink:#17262b;--mute:#5d6f76;--line:#cbd6da;--teal:#0f4c5c;--go:#1c8f4e;--stop:#c0392b;--r:14px}
+@media (prefers-color-scheme:dark){:root{--bg:#10191c;--panel:#182327;--ink:#e6eef0;--mute:#8ea2a9;--line:#2b3c42;--teal:#5cb8cf}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:20px}
+main{max-width:880px;margin:0 auto;display:grid;gap:20px;grid-template-columns:340px 1fr}
+@media(max-width:780px){main{grid-template-columns:1fr}}
+h1{font-size:1.25rem;margin:0 0 4px}
+.sub{color:var(--mute);margin:0 0 16px;font-size:.9rem}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px}
+label{display:block;font-size:.85rem;color:var(--mute);margin:10px 0 4px}
+input{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:10px;padding:10px 14px}
+button:hover{border-color:var(--teal)}
+:focus-visible{outline:3px solid var(--teal);outline-offset:2px}
+.status{display:flex;align-items:center;gap:8px;font-size:.9rem;margin-bottom:12px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--mute)}
+.dot.on{background:var(--go)}.dot.err{background:var(--stop)}
+#num{font-size:1.6rem;text-align:center;letter-spacing:.05em;padding:14px}
+.pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:14px 0}
+.pad button{font-size:1.3rem;padding:14px 0}
+.row{display:flex;gap:8px}.row button{flex:1}
+#call{background:var(--go);border-color:var(--go);color:#fff;font-weight:600}
+#hang{background:var(--stop);border-color:var(--stop);color:#fff;font-weight:600}
+button:disabled{opacity:.45;cursor:not-allowed}
+#incoming{display:none;margin-top:12px;padding:12px;border:1px solid var(--go);border-radius:10px}
+ul{list-style:none;margin:0;padding:0}
+li{display:flex;justify-content:space-between;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);font-size:.92rem}
+li button{padding:4px 10px;font-size:.85rem}
+.in{color:var(--go)}.out{color:var(--teal)}.miss{color:var(--stop)}
+.note{font-size:.8rem;color:var(--mute);margin-top:12px}
+</style>
+</head>
+<body>
+<main>
+  <section class="panel" aria-label="Dialer">
+    <h1>Dialer</h1>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">Not connected</span></div>
+    <input id="num" inputmode="tel" placeholder="Number" aria-label="Phone number">
+    <div class="pad" id="pad"></div>
+    <div class="row"><button id="call" disabled>Call</button><button id="hang" disabled>Hang up</button></div>
+    <div class="row" style="margin-top:8px"><button id="mute" disabled>Mute</button></div>
+    <div id="incoming"><strong id="who"></strong> is calling
+      <div class="row" style="margin-top:8px"><button id="ans">Answer</button><button id="rej">Reject</button></div></div>
+    <audio id="remote" autoplay></audio>
+  </section>
+
+  <div style="display:grid;gap:20px;align-content:start">
+    <section class="panel" aria-label="Account">
+      <h1>Account</h1>
+      <div id="loginBox">
+        <p class="sub">Admin ne jo User ID aur password diya hai wo daalo.</p>
+        <label for="lu">User ID</label><input id="lu" autocomplete="username">
+        <label for="lp">Password</label><input id="lp" type="password" autocomplete="current-password">
+        <div class="row" style="margin-top:14px"><button id="loginBtn">Login</button></div>
+      </div>
+      <div id="userBox" style="display:none">
+        <p class="sub" id="whoami"></p>
+        <div class="row"><button id="logout">Logout</button><button id="adminBtn" style="display:none" onclick="location.href='/admin.html'">Manage users</button></div>
+      </div>
+    </section>
+    <section class="panel" aria-label="Call history">
+      <h1>Call history</h1>
+      <ul id="log"></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let ua = null, session = null, muted = false;
+const RTC = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+
+// keypad
+"123456789*0#".split("").forEach(k => {
+  const b = document.createElement("button"); b.textContent = k;
+  b.onclick = () => { $("num").value += k; if (session && session.isEstablished()) session.sendDTMF(k); };
+  $("pad").appendChild(b);
+});
+
+let sip = null;
+function setStatus(text, cls) { $("status").textContent = text; $("dot").className = "dot " + (cls || ""); }
+
+async function api(path, opts) {
+  const r = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || "Error");
+  return d;
+}
+// call history server par save hoti hai, har user ki apni
+function addLog(type, number) {
+  api("/api/calls", { method: "POST", body: JSON.stringify({ type, number }) }).then(renderLog).catch(() => {});
+}
+async function renderLog() {
+  const ul = $("log"); let l = [];
+  try { l = (await api("/api/calls")).calls; } catch (e) {}
+  ul.innerHTML = "";
+  if (!l.length) { const li = document.createElement("li"); li.textContent = "Abhi tak koi call nahi. Number dial karke shuru karo."; ul.appendChild(li); return; }
+  l.forEach(c => {
+    const li = document.createElement("li"), box = document.createElement("span"), tag = document.createElement("span");
+    tag.className = c.type; tag.textContent = { in: "Received", out: "Dialed", miss: "Missed" }[c.type];
+    const small = document.createElement("small"); small.textContent = new Date(c.at.replace(" ", "T") + "Z").toLocaleString();
+    box.append(tag, " " + c.number, document.createElement("br"), small);
+    const b = document.createElement("button"); b.textContent = "Call again";
+    b.onclick = () => { $("num").value = c.number; };
+    li.append(box, b); ul.appendChild(li);
+  });
+}
+
+function bind(s, dir, number) {
+  session = s; let answered = false;
+  s.on("peerconnection", ({ peerconnection }) =>
+    peerconnection.addEventListener("track", e => { $("remote").srcObject = e.streams[0]; }));
+  s.on("progress", () => setStatus("Ringing...", "on"));
+  s.on("confirmed", () => { answered = true; setStatus("On call: " + number, "on"); $("mute").disabled = false; });
+  const done = () => {
+    if (dir === "in" && !answered) addLog("miss", number); else addLog(dir, number);
+    session = null; muted = false; $("mute").textContent = "Mute"; $("mute").disabled = true;
+    $("hang").disabled = true; $("incoming").style.display = "none";
+    setStatus("Connected as " + sip.ext, "on");
+  };
+  s.on("ended", done);
+  s.on("failed", e => { setStatus("Call failed: " + (e.cause || "unknown"), "err"); done(); });
+  $("hang").disabled = false;
+}
+
+function connectSip(cfg) {
+  if (ua) ua.stop();
+  setStatus("Connecting...");
+  ua = new JsSIP.UA({
+    sockets: [new JsSIP.WebSocketInterface(cfg.wss)],
+    uri: `sip:${cfg.ext}@${cfg.domain}`, password: cfg.secret, display_name: cfg.ext
+  });
+  ua.on("registered", () => { setStatus("Connected as " + cfg.ext, "on"); $("call").disabled = false; });
+  ua.on("registrationFailed", e => setStatus("PBX login failed: " + (e.cause || "extension details check karo"), "err"));
+  ua.on("disconnected", () => setStatus("PBX se connection toota", "err"));
+  ua.on("newRTCSession", ({ originator, session: s }) => {
+    if (originator === "remote") {
+      const from = s.remote_identity.uri.user;
+      if (session) { s.terminate({ status_code: 486 }); return; }
+      $("who").textContent = from; $("incoming").style.display = "block";
+      bind(s, "in", from);
+      $("ans").onclick = () => { $("incoming").style.display = "none"; s.answer({ mediaConstraints: { audio: true, video: false }, pcConfig: RTC }); };
+      $("rej").onclick = () => s.terminate();
+    }
+  });
+  ua.start();
+}
+
+function showUser(d) {
+  $("loginBox").style.display = "none"; $("userBox").style.display = "block";
+  $("whoami").textContent = "Signed in as " + d.user.username;
+  $("adminBtn").style.display = d.user.role === "admin" ? "inline-block" : "none";
+  renderLog();
+  if (d.sip) { sip = d.sip; connectSip(sip); }
+  else setStatus("Is account ko abhi koi extension assign nahi hua. Admin se kaho.", "err");
+}
+$("loginBtn").onclick = async () => {
+  try { showUser(await api("/api/login", { method: "POST", body: JSON.stringify({ username: $("lu").value.trim(), password: $("lp").value }) })); $("lp").value = ""; }
+  catch (e) { setStatus(e.message, "err"); }
+};
+$("lp").addEventListener("keydown", e => { if (e.key === "Enter") $("loginBtn").click(); });
+$("logout").onclick = async () => { await api("/api/logout", { method: "POST" }).catch(() => {}); if (ua) ua.stop(); location.reload(); };
+api("/api/me").then(showUser).catch(() => {});
+
+$("call").onclick = () => {
+  const n = $("num").value.trim(); if (!n || !ua || session) return;
+  const s = ua.call(`sip:${n}@${sip.domain}`, { mediaConstraints: { audio: true, video: false }, pcConfig: RTC });
+  bind(s, "out", n); setStatus("Calling " + n + "...", "on");
+};
+$("hang").onclick = () => { if (session) session.terminate(); };
+$("mute").onclick = () => {
+  if (!session) return; muted = !muted;
+  muted ? session.mute({ audio: true }) : session.unmute({ audio: true });
+  $("mute").textContent = muted ? "Unmute" : "Mute";
+};
+</script>
+</body>
+</html>

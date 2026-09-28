@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Admin - Users</title>
+<style>
+:root{--bg:#e8edef;--panel:#f7f9fa;--ink:#17262b;--mute:#5d6f76;--line:#cbd6da;--teal:#0f4c5c;--stop:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#10191c;--panel:#182327;--ink:#e6eef0;--mute:#8ea2a9;--line:#2b3c42;--teal:#5cb8cf}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif;padding:20px}
+main{max-width:900px;margin:0 auto;display:grid;gap:20px}
+h1{font-size:1.25rem;margin:0 0 10px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;overflow-x:auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+label{display:block;font-size:.85rem;color:var(--mute);margin-bottom:4px}
+input,select,button{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);width:100%}
+button{cursor:pointer;width:auto}button:hover{border-color:var(--teal)}
+:focus-visible{outline:3px solid var(--teal);outline-offset:2px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
+td button{padding:4px 9px;font-size:.85rem;margin-right:4px}
+#msg{margin:10px 0 0;font-size:.9rem;color:var(--mute)}.err{color:var(--stop)!important}
+</style>
+</head>
+<body>
+<main>
+  <div><h1>Users</h1><a href="/">Dialer par wapas</a></div>
+  <section class="panel" aria-label="Naya user">
+    <h1>Naya user banao</h1>
+    <div class="grid">
+      <div><label for="u">User ID</label><input id="u" autocomplete="off"></div>
+      <div><label for="p">Password (8+ character)</label><input id="p" type="text" autocomplete="off"></div>
+      <div><label for="e">PBX extension</label><input id="e" placeholder="1001" autocomplete="off"></div>
+      <div><label for="s">Extension password</label><input id="s" autocomplete="off"></div>
+      <div><label for="r">Role</label><select id="r"><option value="agent">Agent</option><option value="admin">Admin</option></select></div>
+    </div>
+    <p style="margin:12px 0 0"><button id="add">Create user</button></p>
+    <p id="msg"></p>
+  </section>
+  <section class="panel" aria-label="Users list">
+    <table><thead><tr><th>User ID</th><th>Role</th><th>Extension</th><th>Status</th><th>Actions</th></tr></thead><tbody id="rows"></tbody></table>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+async function api(path, method, body) {
+  const r = await fetch(path, { method: method || "GET", headers: { "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
+  const d = await r.json().catch(() => ({}));
+  if (r.status === 401 || r.status === 403) { location.href = "/"; throw new Error("Admin login chahiye"); }
+  if (!r.ok) throw new Error(d.error || "Error");
+  return d;
+}
+function say(t, bad) { $("msg").textContent = t; $("msg").className = bad ? "err" : ""; }
+function btn(label, fn) { const b = document.createElement("button"); b.textContent = label; b.onclick = async () => { try { await fn(); await load(); } catch (e) { say(e.message, true); } }; return b; }
+async function load() {
+  const { users } = await api("/api/admin/users");
+  const tb = $("rows"); tb.innerHTML = "";
+  users.forEach(u => {
+    const tr = document.createElement("tr");
+    [u.username, u.role, u.ext || "-", u.active ? "Active" : "Disabled"].forEach(v => { const td = document.createElement("td"); td.textContent = v; tr.appendChild(td); });
+    const td = document.createElement("td");
+    td.appendChild(btn("Reset password", async () => { const p = prompt("Naya password (8+ character) for " + u.username); if (p) await api("/api/admin/users/" + u.id, "PATCH", { password: p }); }));
+    td.appendChild(btn("Change extension", async () => { const e = prompt("Extension number", u.ext || ""); if (e === null) return; const s = prompt("Extension password (khaali chhodo to same rahega)"); await api("/api/admin/users/" + u.id, "PATCH", s ? { ext: e, ext_secret: s } : { ext: e }); }));
+    td.appendChild(btn(u.active ? "Disable" : "Enable", () => api("/api/admin/users/" + u.id, "PATCH", { active: u.active ? 0 : 1 })));
+    td.appendChild(btn("Delete", async () => { if (confirm(u.username + " ko delete kare? Uski call history bhi hat jayegi.")) await api("/api/admin/users/" + u.id, "DELETE"); }));
+    tr.appendChild(td); tb.appendChild(tr);
+  });
+}
+$("add").onclick = async () => {
+  try {
+    await api("/api/admin/users", "POST", { username: $("u").value.trim(), password: $("p").value, ext: $("e").value.trim(), ext_secret: $("s").value, role: $("r").value });
+    ["u", "p", "e", "s"].forEach(i => $(i).value = ""); say("User ban gaya. ID aur password user ko de do."); await load();
+  } catch (e) { say(e.message, true); }
+};
+load().catch(e => say(e.message, true));
+</script>
+</body>
+</html>
